@@ -621,7 +621,7 @@ proc start_rev_list {view} {
     global viewactive viewinstances vmergeonly
     global mainheadid viewmainheadid viewmainheadid_orig
     global vcanopt vflags vrevs vorigargs
-    global detachmerged mainlineids
+    global detachmerged highlightmain mainlineids
 
     set startmsecs [clock clicks -milliseconds]
     set commitidx($view) 0
@@ -630,7 +630,7 @@ proc start_rev_list {view} {
     set viewactive($view) 0
     varcinit $view
 
-    if {$detachmerged} {
+    if {$detachmerged || $highlightmain} {
         compute_mainlineids
     } else {
         unset -nocomplain mainlineids
@@ -6073,6 +6073,19 @@ proc linewidth {id} {
     return $wid
 }
 
+# True if the edge from child $c to parent $p is part of the highlighted
+# mainline: $c must be on the mainline and $p its first parent.  This keeps
+# exactly one highlighted line per row (the first-parent chain), rather than
+# lighting up every branch that forks off a mainline commit.
+proc is_mainline_edge {c p} {
+    global highlightmain mainlineids parents curview
+
+    if {!$highlightmain || ![info exists mainlineids($c)]} {
+        return 0
+    }
+    return [expr {$p eq [lindex $parents($curview,$c) 0]}]
+}
+
 proc rowranges {id} {
     global curview children uparrowlen downarrowlen
     global rowidlist
@@ -6132,6 +6145,7 @@ proc rowranges {id} {
 proc drawlineseg {id row endrow arrowlow} {
     global rowidlist displayorder iddrawn linesegs
     global canv colormap linespc curview maxlinelen parentlist
+    global mainlinecolor lthickness children
 
     set cols [list [lsearch -exact [lindex $rowidlist $row] $id]]
     set le [expr {$row + 1}]
@@ -6256,8 +6270,18 @@ proc drawlineseg {id row endrow arrowlow} {
         }
         if {!$joinhigh} {
             assigncolor $id
-            set t [$canv create line $coords -width [linewidth $id] \
-                       -fill $colormap($id) -tags lines.$id -arrow $arrow]
+            # lines.$id always runs up to $id's first child, so base the
+            # mainline test on that child (not on this segment's top row,
+            # which differs for lines split across maxlinelen pieces).
+            if {[is_mainline_edge [lindex $children($curview,$id) 0] $id]} {
+                set lfill $mainlinecolor
+                set lwid [expr {2 * $lthickness}]
+            } else {
+                set lfill $colormap($id)
+                set lwid [linewidth $id]
+            }
+            set t [$canv create line $coords -width $lwid \
+                       -fill $lfill -tags lines.$id -arrow $arrow]
             $canv lower $t
             bindline $t $id
             set lines [linsert $lines $i [list $row $le $t]]
@@ -6297,7 +6321,7 @@ proc drawlineseg {id row endrow arrowlow} {
 
 proc drawparentlinks {id row} {
     global rowidlist canv colormap curview parentlist
-    global idpos linespc
+    global idpos linespc mainlinecolor lthickness
 
     set rowids [lindex $rowidlist $row]
     set col [lsearch -exact $rowids $id]
@@ -6353,8 +6377,15 @@ proc drawparentlinks {id row} {
         } else {
             lappend coords $x2 $y2
         }
-        set t [$canv create line $coords -width [linewidth $p] \
-                   -fill $colormap($p) -tags lines.$p]
+        if {[is_mainline_edge $id $p]} {
+            set lfill $mainlinecolor
+            set lwid [expr {2 * $lthickness}]
+        } else {
+            set lfill $colormap($p)
+            set lwid [linewidth $p]
+        }
+        set t [$canv create line $coords -width $lwid \
+                   -fill $lfill -tags lines.$p]
         $canv lower $t
         bindline $t $p
     }
@@ -11869,6 +11900,11 @@ proc prefspage_general {notebook} {
         -variable detachmerged
     grid x $page.detachmerged -sticky w
 
+    ttk::checkbutton $page.highlightmain \
+        -text [mc "Highlight mainline (first-parent chain of main/master)"] \
+        -variable highlightmain
+    grid x $page.highlightmain -sticky w
+
     ttk::checkbutton $page.hideremotes -text [mc "Hide remote refs"] \
         -variable hideremotes
     grid x $page.hideremotes -sticky w
@@ -11953,7 +11989,7 @@ proc prefspage_general {notebook} {
 
 proc prefspage_colors {notebook} {
     global bgcolor fgcolor ctext diffcolors selectbgcolor markbgcolor
-    global diffbgcolors linkfgcolor
+    global diffbgcolors linkfgcolor mainlinecolor
     global themeloader
 
     set page [create_prefs_page $notebook.colors]
@@ -12035,6 +12071,11 @@ proc prefspage_colors {notebook} {
         -command [list choosecolor linkfgcolor {} $page [mc "link"]]
     grid x $page.linkfgbut $page.linkfg -sticky w
 
+    label $page.mainline -padx 40 -relief sunk -background $mainlinecolor
+    ttk::button $page.mainlinebut -text [mc "Mainline highlight"] \
+        -command [list choosecolor mainlinecolor {} $page [mc "mainline highlight"]]
+    grid x $page.mainlinebut $page.mainline -sticky w
+
     grid columnconfigure $page 2 -weight 1
 
     return $page
@@ -12042,8 +12083,9 @@ proc prefspage_colors {notebook} {
 
 proc prefspage_set_colorswatches {page} {
     global bgcolor fgcolor ctext diffcolors selectbgcolor markbgcolor
-    global diffbgcolors linkfgcolor
+    global diffbgcolors linkfgcolor mainlinecolor
 
+    $page.mainline configure -background $mainlinecolor
     $page.bg configure -background $bgcolor
     $page.fg configure -background $fgcolor
     $page.diffold configure -background [lindex $diffcolors 0]
@@ -12298,8 +12340,17 @@ proc prefsok {} {
     if {$hideremotes != $oldprefs(hideremotes) || $refstohide != $oldprefs(refstohide)} {
         rereadrefs
     }
+    set reloaded 0
     if {$detachmerged != $oldprefs(detachmerged)} {
         reloadcommits
+        set reloaded 1
+    }
+    if {!$reloaded && ($highlightmain != $oldprefs(highlightmain) ||
+            ($highlightmain && $mainlinecolor != $oldprefs(mainlinecolor)))} {
+        if {$highlightmain} {
+            compute_mainlineids
+        }
+        redisplay
     }
     if {$wrapcomment != $oldprefs(wrapcomment)} {
         $ctext tag conf comment -wrap $wrapcomment
@@ -12816,6 +12867,8 @@ set autosellen $hashlength
 set perfile_attrs 0
 set mergetomain 0
 set detachmerged 0
+set highlightmain 0
+set mainlinecolor "#0a84ff"
 
 if {[tk windowingsystem] eq "aqua"} {
     set extdifftool "opendiff"
@@ -12932,6 +12985,7 @@ set config_variables {
     headfgcolor
     headoutlinecolor
     hideremotes
+    highlightmain
     indexcirclecolor
     kscroll
     limitdiffs
@@ -12941,6 +12995,7 @@ set config_variables {
     linkfgcolor
     mainfont
     mainheadcirclecolor
+    mainlinecolor
     markbgcolor
     maxgraphpct
     maxrefs
