@@ -7976,13 +7976,42 @@ proc mergediff {id} {
     global diffmergeid
     global diffids treediffs
     global parents curview
+    global mergetomain
 
     set diffmergeid $id
     set diffids $id
     set treediffs($id) {}
     set np [llength $parents($curview,$id)]
     settabs $np
+    if {$mergetomain} {
+        appendmergecommits $id
+    }
     getblobdiffs $id
+}
+
+# List the commits brought in by merge commit $id (those reachable from
+# the merge but not from its first parent, excluding the merge itself)
+# as clickable links at the top of the diff pane.
+proc appendmergecommits {id} {
+    global ctext parents curview
+
+    set p0 [lindex $parents($curview,$id) 0]
+    if {[catch {set log [safe_exec [list git log --no-decorate \
+              {--pretty=format:%H %s} $p0..$id]]}]} {
+        return
+    }
+    $ctext conf -state normal
+    $ctext insert end "\n"
+    $ctext insert end "[mc "Commits merged in:"]\n" filesep
+    foreach line [split $log "\n"] {
+        if {$line eq {}} continue
+        set sha [lindex $line 0]
+        if {$sha eq $id} continue
+        set rest [string range $line 41 end]
+        appendwithlinks "    [string range $sha 0 9]  $rest\n" {}
+    }
+    $ctext insert end "\n"
+    $ctext conf -state disabled
 }
 
 proc startdiff {ids} {
@@ -8207,6 +8236,7 @@ proc getblobdiffs {ids} {
     global ignorespace
     global worddiff
     global limitdiffs vfilelimit curview
+    global mergetomain parents blobdiffnetpending
 
     set cmd [diffcmd $ids "-p --textconv --submodule -C --cc --no-commit-id -U$diffcontext"]
     if {$ignorespace} {
@@ -8218,6 +8248,22 @@ proc getblobdiffs {ids} {
     if {$limitdiffs && $vfilelimit($curview) ne {}} {
         set cmd [concat $cmd -- $vfilelimit($curview)]
     }
+    # For a merge in "merge to main" mode, queue a second pass showing the
+    # full diff between the merge and its first parent (the net change the
+    # merged branch brought to the mainline).
+    unset -nocomplain blobdiffnetpending($ids)
+    if {$mergetomain && [llength $parents($curview,$ids)] > 1} {
+        set p0 [lindex $parents($curview,$ids) 0]
+        set netcmd [diffcmd [list $p0 $ids] \
+                        "-p --textconv --submodule -C --no-commit-id -U$diffcontext"]
+        if {$ignorespace} {
+            append netcmd " -w"
+        }
+        if {$worddiff ne [mc "Line diff"]} {
+            append netcmd " --word-diff=porcelain"
+        }
+        set blobdiffnetpending($ids) $netcmd
+    }
     if {[catch {set bdf [safe_open_command $cmd]} err]} {
         error_popup [mc "Error getting diffs: %s" $err]
         return
@@ -8225,6 +8271,26 @@ proc getblobdiffs {ids} {
     fconfigure $bdf -blocking 0 -translation binary
     set blobdifffd($ids) $bdf
     initblobdiffvars
+    filerun $bdf [list getblobdiffline $bdf $diffids]
+}
+
+# Start the queued "net diff to first parent" pass, appending to the
+# existing diff output rather than clearing it.
+proc getblobnetdiff {ids} {
+    global blobdifffd diffids blobdiffnetpending ctext
+
+    set cmd $blobdiffnetpending($ids)
+    unset blobdiffnetpending($ids)
+    if {[catch {set bdf [safe_open_command $cmd]} err]} {
+        error_popup [mc "Error getting diffs: %s" $err]
+        return
+    }
+    $ctext conf -state normal
+    $ctext insert end "\n"
+    $ctext insert end "[mc "Full diff to first parent:"]\n" filesep
+    $ctext conf -state disabled
+    fconfigure $bdf -blocking 0 -translation binary
+    set blobdifffd($ids) $bdf
     filerun $bdf [list getblobdiffline $bdf $diffids]
 }
 
@@ -8276,9 +8342,14 @@ proc makediffhdr {fname ids} {
     set fname [convertfrom utf-8 $fname]
     set diffencoding [get_path_encoding $fname]
     set i [lsearch -exact $treediffs($ids) $fname]
-    if {$i >= 0} {
-        setinlist difffilestart $i $curdiffstart
+    if {$i < 0} {
+        # A file only present in an appended diff pass (e.g. the net diff
+        # to first parent): add it to the file list so it stays clickable.
+        lappend treediffs($ids) $fname
+        add_flist [list $fname]
+        set i [expr {[llength $treediffs($ids)] - 1}]
     }
+    setinlist difffilestart $i $curdiffstart
     lset ctext_file_names end $fname
     set l [expr {(78 - [string length $fname]) / 2}]
     set pad [string range "----------------------------------------" 1 $l]
@@ -8299,7 +8370,7 @@ proc blobdiffmaybeseehere {ateof} {
 }
 
 proc getblobdiffline {bdf ids} {
-    global diffids blobdifffd
+    global diffids blobdifffd blobdiffnetpending
     global ctext
 
     set nr 0
@@ -8310,6 +8381,7 @@ proc getblobdiffline {bdf ids} {
             catch {close $bdf}
             if {$ids != $diffids} {
                 array unset blobdifffd $ids
+                array unset blobdiffnetpending $ids
             }
             return 0
         }
@@ -8320,6 +8392,9 @@ proc getblobdiffline {bdf ids} {
     if {[eof $bdf]} {
         catch {close $bdf}
         array unset blobdifffd $ids
+        if {[info exists blobdiffnetpending($ids)] && $ids == $diffids} {
+            getblobnetdiff $ids
+        }
         return 0
     }
     return [expr {$nr >= 1000? 2: 1}]
@@ -11777,6 +11852,11 @@ proc prefspage_general {notebook} {
         -variable limitdiffs
     grid x $page.ldiff -sticky w
 
+    ttk::checkbutton $page.mergetomain \
+        -text [mc "For merges, list merged commits and diff to first parent"] \
+        -variable mergetomain
+    grid x $page.mergetomain -sticky w
+
     ttk::checkbutton $page.lattr -text [mc "Support per-file encodings"] \
         -variable perfile_attrs
     grid x $page.lattr -sticky w
@@ -12140,7 +12220,8 @@ proc prefsok {} {
         || $maxgraphpct != $oldprefs(maxgraphpct)} {
         redisplay
     } elseif {$showneartags != $oldprefs(showneartags) ||
-          $limitdiffs != $oldprefs(limitdiffs)} {
+          $limitdiffs != $oldprefs(limitdiffs) ||
+          $mergetomain != $oldprefs(mergetomain)} {
         reselectline
     }
     if {$hideremotes != $oldprefs(hideremotes) || $refstohide != $oldprefs(refstohide)} {
@@ -12659,6 +12740,7 @@ set autocopy 0
 set autoselect 1
 set autosellen $hashlength
 set perfile_attrs 0
+set mergetomain 0
 
 if {[tk windowingsystem] eq "aqua"} {
     set extdifftool "opendiff"
@@ -12788,6 +12870,7 @@ set config_variables {
     maxrefs
     maxwidth
     mergecolors
+    mergetomain
     perfile_attrs
     reflinecolor
     refstohide
