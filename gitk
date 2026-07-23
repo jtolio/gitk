@@ -583,6 +583,35 @@ proc parseviewrevs {view revs} {
     return $ret
 }
 
+# Pick the ref whose first-parent chain is treated as "the mainline":
+# prefer main, then master, then their origin/ counterparts, else HEAD.
+proc mainline_ref {} {
+    foreach ref {main master origin/main origin/master} {
+        if {![catch {set out [safe_exec [list git rev-parse --verify \
+                  --quiet $ref]]}] && $out ne {}} {
+            return $ref
+        }
+    }
+    return HEAD
+}
+
+# Populate the global mainlineids array with the commits on the mainline's
+# first-parent chain.  Used by the "detach merged branches" and "highlight
+# mainline" features.
+proc compute_mainlineids {} {
+    global mainlineids
+    unset -nocomplain mainlineids
+    if {[catch {set out [safe_exec [list git rev-list --first-parent \
+              [mainline_ref]]]}]} {
+        return
+    }
+    foreach id [split $out "\n"] {
+        if {$id ne {}} {
+            set mainlineids($id) 1
+        }
+    }
+}
+
 # Start off a git log process and arrange to read its output
 proc start_rev_list {view} {
     global startmsecs commitidx viewcomplete curview
@@ -592,6 +621,7 @@ proc start_rev_list {view} {
     global viewactive viewinstances vmergeonly
     global mainheadid viewmainheadid viewmainheadid_orig
     global vcanopt vflags vrevs vorigargs
+    global detachmerged mainlineids
 
     set startmsecs [clock clicks -milliseconds]
     set commitidx($view) 0
@@ -599,6 +629,12 @@ proc start_rev_list {view} {
     set viewcomplete($view) 1
     set viewactive($view) 0
     varcinit $view
+
+    if {$detachmerged} {
+        compute_mainlineids
+    } else {
+        unset -nocomplain mainlineids
+    }
 
     set args $viewargs($view)
     if {$viewargscmd($view) ne {}} {
@@ -1655,6 +1691,7 @@ proc getcommitlines {fd inst view updating}  {
     global idpending ordertok
     global varccommits varcid varctok vtokmod vfilelimit vshortids
     global hashlength
+    global detachmerged mainlineids nullid nullid2 origparents
 
     set stuff [read $fd 500000]
     # git log doesn't terminate the last commit with a null...
@@ -1784,6 +1821,27 @@ proc getcommitlines {fd inst view updating}  {
             set olds [lrange $ids 1 end]
         } else {
             set olds {}
+        }
+        # "Detach merged branches": for a commit that is not on the mainline
+        # (first-parent chain of main/master/HEAD), drop any parent that is
+        # on the mainline.  This cuts each merged branch loose from its
+        # merge-base so it hangs off its merge commit instead of drawing a
+        # long line back to where it forked.  The merge commit itself is on
+        # the mainline, so its link to the branch tip is kept.
+        if {$detachmerged && $listed && $id ne $nullid && $id ne $nullid2 \
+                && ![info exists mainlineids($id)]} {
+            set fp {}
+            foreach p $olds {
+                if {![info exists mainlineids($p)]} {
+                    lappend fp $p
+                }
+            }
+            if {$fp ne $olds} {
+                # Remember the true parents so the commit detail pane can
+                # still show and link to the (detached) merge-base.
+                set origparents($vid) $olds
+            }
+            set olds $fp
         }
         set commitdata($id) [string range $cmit [expr {$j + 1}] end]
         set cmitlisted($vid) $listed
@@ -7499,7 +7557,7 @@ proc make_idmark {id} {
 
 proc selectline {l isnew {desired_loc {}} {switch_to_patch 0}} {
     global canv ctext commitinfo selectedline
-    global canvy0 linespc parents children curview
+    global canvy0 linespc parents children curview origparents
     global currentid sha1entry
     global commentend idtags linknum
     global mergemax numcommits pending_select
@@ -7601,9 +7659,17 @@ proc selectline {l isnew {desired_loc {}} {switch_to_patch 0}} {
 
     set headers {}
     set olds $parents($curview,$id)
-    if {[llength $olds] > 1} {
+    # If this branch was detached from its merge-base in the graph, show the
+    # true parents in the header so the merge-base stays visible and
+    # clickable; the graph/diff still use the (detached) parents.
+    if {[info exists origparents($curview,$id)]} {
+        set dispolds $origparents($curview,$id)
+    } else {
+        set dispolds $olds
+    }
+    if {[llength $dispolds] > 1} {
         set np 0
-        foreach p $olds {
+        foreach p $dispolds {
             if {$np >= $mergemax} {
                 set tag mmax
             } else {
@@ -7614,7 +7680,7 @@ proc selectline {l isnew {desired_loc {}} {switch_to_patch 0}} {
             incr np
         }
     } else {
-        foreach p $olds {
+        foreach p $dispolds {
             append headers "[mc "Parent"]: [commit_descriptor $p]"
         }
     }
@@ -11798,6 +11864,11 @@ proc prefspage_general {notebook} {
         -variable showlocalchanges
     grid x $page.showlocal -sticky w
 
+    ttk::checkbutton $page.detachmerged \
+        -text [mc "Detach merged branches from their merge-base"] \
+        -variable detachmerged
+    grid x $page.detachmerged -sticky w
+
     ttk::checkbutton $page.hideremotes -text [mc "Hide remote refs"] \
         -variable hideremotes
     grid x $page.hideremotes -sticky w
@@ -12226,6 +12297,9 @@ proc prefsok {} {
     }
     if {$hideremotes != $oldprefs(hideremotes) || $refstohide != $oldprefs(refstohide)} {
         rereadrefs
+    }
+    if {$detachmerged != $oldprefs(detachmerged)} {
+        reloadcommits
     }
     if {$wrapcomment != $oldprefs(wrapcomment)} {
         $ctext tag conf comment -wrap $wrapcomment
@@ -12741,6 +12815,7 @@ set autoselect 1
 set autosellen $hashlength
 set perfile_attrs 0
 set mergetomain 0
+set detachmerged 0
 
 if {[tk windowingsystem] eq "aqua"} {
     set extdifftool "opendiff"
@@ -12843,6 +12918,7 @@ set config_variables {
     colors
     currentsearchhitbgcolor
     datetimeformat
+    detachmerged
     diffbgcolors
     diffcolors
     diffcontext
