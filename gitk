@@ -595,19 +595,27 @@ proc mainline_ref {} {
     return HEAD
 }
 
-# Populate the global mainlineids array with the commits on the mainline's
-# first-parent chain.  Used by the "detach merged branches" and "highlight
-# mainline" features.
+# Populate two globals from a single first-parent walk of the mainline:
+#   mainlineids   - commits on the mainline first-parent chain (the spine),
+#                   used by the "highlight mainline" feature and as the
+#                   "off-mainline" test for detaching.
+#   mainlinetips  - the direct non-first parents of mainline merges, i.e. the
+#                   branch tips that were merged in.  Used by "detach merged
+#                   branches" to also cut a stub where development continued
+#                   from a previously merged tip and was merged again later.
 proc compute_mainlineids {} {
-    global mainlineids
+    global mainlineids mainlinetips
     unset -nocomplain mainlineids
+    unset -nocomplain mainlinetips
     if {[catch {set out [safe_exec [list git rev-list --first-parent \
-              [mainline_ref]]]}]} {
+              --parents [mainline_ref]]]}]} {
         return
     }
-    foreach id [split $out "\n"] {
-        if {$id ne {}} {
-            set mainlineids($id) 1
+    foreach line [split $out "\n"] {
+        if {$line eq {}} continue
+        set mainlineids([lindex $line 0]) 1
+        foreach p [lrange $line 2 end] {
+            set mainlinetips($p) 1
         }
     }
 }
@@ -621,7 +629,7 @@ proc start_rev_list {view} {
     global viewactive viewinstances vmergeonly
     global mainheadid viewmainheadid viewmainheadid_orig
     global vcanopt vflags vrevs vorigargs
-    global detachmerged highlightmain mainlineids
+    global detachmerged highlightmain mainlineids mainlinetips
 
     set startmsecs [clock clicks -milliseconds]
     set commitidx($view) 0
@@ -634,6 +642,7 @@ proc start_rev_list {view} {
         compute_mainlineids
     } else {
         unset -nocomplain mainlineids
+        unset -nocomplain mainlinetips
     }
 
     set args $viewargs($view)
@@ -1691,7 +1700,7 @@ proc getcommitlines {fd inst view updating}  {
     global idpending ordertok
     global varccommits varcid varctok vtokmod vfilelimit vshortids
     global hashlength
-    global detachmerged mainlineids nullid nullid2 origparents
+    global detachmerged mainlineids mainlinetips nullid nullid2 origparents
 
     set stuff [read $fd 500000]
     # git log doesn't terminate the last commit with a null...
@@ -1824,15 +1833,19 @@ proc getcommitlines {fd inst view updating}  {
         }
         # "Detach merged branches": for a commit that is not on the mainline
         # (first-parent chain of main/master/HEAD), drop any parent that is
-        # on the mainline.  This cuts each merged branch loose from its
-        # merge-base so it hangs off its merge commit instead of drawing a
-        # long line back to where it forked.  The merge commit itself is on
-        # the mainline, so its link to the branch tip is kept.
+        # already part of the mainline - either on the spine, or a branch tip
+        # that was previously merged in.  This cuts each merged branch loose
+        # from its merge-base so it hangs off its merge commit instead of
+        # drawing a long line back to where it forked; cutting at merged tips
+        # also handles branches that were merged, continued, and merged again.
+        # The merge commit itself is on the mainline, so its link to the
+        # branch tip is kept.
         if {$detachmerged && $listed && $id ne $nullid && $id ne $nullid2 \
                 && ![info exists mainlineids($id)]} {
             set fp {}
             foreach p $olds {
-                if {![info exists mainlineids($p)]} {
+                if {![info exists mainlineids($p)] \
+                        && ![info exists mainlinetips($p)]} {
                     lappend fp $p
                 }
             }
