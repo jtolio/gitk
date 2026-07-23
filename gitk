@@ -8468,13 +8468,15 @@ proc blobdiffmaybeseehere {ateof} {
 
 proc getblobdiffline {bdf ids} {
     global diffids blobdifffd blobdiffnetpending
-    global ctext
+    global ctext treediffs
 
     set nr 0
     $ctext conf -state normal
     while {[incr nr] <= 1000 && [gets $bdf line] >= 0} {
-        if {$ids != $diffids || $bdf != $blobdifffd($ids)} {
-            # Older diff read. Abort it.
+        if {$ids != $diffids || $bdf != $blobdifffd($ids) \
+                || ![info exists treediffs($ids)]} {
+            # Older diff read (superseded by a new selection or a reload
+            # that cleared treediffs).  Abort it.
             catch {close $bdf}
             if {$ids != $diffids} {
                 array unset blobdifffd $ids
@@ -8489,8 +8491,11 @@ proc getblobdiffline {bdf ids} {
     if {[eof $bdf]} {
         catch {close $bdf}
         array unset blobdifffd $ids
-        if {[info exists blobdiffnetpending($ids)] && $ids == $diffids} {
+        if {[info exists blobdiffnetpending($ids)] && $ids == $diffids \
+                && [info exists treediffs($ids)]} {
             getblobnetdiff $ids
+        } else {
+            array unset blobdiffnetpending $ids
         }
         return 0
     }
@@ -12329,8 +12334,19 @@ proc prefsok {} {
         # won't have encodings cached if perfile_attrs was just turned on
         unset -nocomplain treediffs
     }
-    if {$fontchanged || $maxwidth != $oldprefs(maxwidth)
-        || $maxgraphpct != $oldprefs(maxgraphpct)} {
+    # A reload re-lays-out, re-selects and re-renders everything, so when
+    # one is needed skip the lighter-weight redisplay/reselectline paths to
+    # avoid kicking off a diff read that the reload would then invalidate.
+    set willreload [expr {$detachmerged != $oldprefs(detachmerged)}]
+    if {$willreload} {
+        reloadcommits
+    } elseif {$fontchanged || $maxwidth != $oldprefs(maxwidth)
+        || $maxgraphpct != $oldprefs(maxgraphpct)
+        || $highlightmain != $oldprefs(highlightmain)
+        || ($highlightmain && $mainlinecolor != $oldprefs(mainlinecolor))} {
+        if {$highlightmain} {
+            compute_mainlineids
+        }
         redisplay
     } elseif {$showneartags != $oldprefs(showneartags) ||
           $limitdiffs != $oldprefs(limitdiffs) ||
@@ -12339,18 +12355,6 @@ proc prefsok {} {
     }
     if {$hideremotes != $oldprefs(hideremotes) || $refstohide != $oldprefs(refstohide)} {
         rereadrefs
-    }
-    set reloaded 0
-    if {$detachmerged != $oldprefs(detachmerged)} {
-        reloadcommits
-        set reloaded 1
-    }
-    if {!$reloaded && ($highlightmain != $oldprefs(highlightmain) ||
-            ($highlightmain && $mainlinecolor != $oldprefs(mainlinecolor)))} {
-        if {$highlightmain} {
-            compute_mainlineids
-        }
-        redisplay
     }
     if {$wrapcomment != $oldprefs(wrapcomment)} {
         $ctext tag conf comment -wrap $wrapcomment
