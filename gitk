@@ -7857,14 +7857,22 @@ proc commitparents {id} {
 }
 
 proc showselectedrange {range} {
-    global ctext commitinfo diffids diffmergeid linknum
+    global ctext commitinfo diffids diffmergeid linknum nullid nullid2
 
     set first [lindex $range 0]
     set last [lindex $range 1]
     set newest [commitonrow $first]
     set oldest [commitonrow $last]
+    set localchanges 0
+    for {set row $first} {$row <= $last} {incr row} {
+        set id [commitonrow $row]
+        if {$id eq $nullid || $id eq $nullid2} {
+            set localchanges 1
+            break
+        }
+    }
     set linear 1
-    for {set row $first} {$row < $last} {incr row} {
+    for {set row $first} {!$localchanges && $row < $last} {incr row} {
         set id [commitonrow $row]
         set next [commitonrow [expr {$row + 1}]]
         if {[lsearch -exact [commitparents $id] $next] < 0} {
@@ -7882,15 +7890,17 @@ proc showselectedrange {range} {
         }
         appendshortlink $id "    " "  [lindex $commitinfo($id) 0]\n"
     }
-    if {!$linear} {
+    if {$localchanges} {
+        $ctext insert end "\n[mc "Combined diffs cannot include local uncommitted changes."]\n" filesep
+    } elseif {!$linear} {
         $ctext insert end "\n[mc "Selected commits do not form a contiguous history."]\n" filesep
     }
     $ctext conf -state disabled
 
-    if {!$linear} {
+    if {$localchanges || !$linear} {
         # Make readers for an earlier selection discard any pending output.
-        set diffids [list nonlinear-selection $newest $oldest]
-        set diffmergeid nonlinear-selection
+        set diffids [list blocked-selection $newest $oldest]
+        set diffmergeid blocked-selection
         settabs 1
         return
     }
