@@ -1424,6 +1424,7 @@ proc modify_arc {v a {lim {}}} {
 
 proc update_arcrows {v} {
     global vtokmod varcmod vrowmod varcrow commitidx currentid selectedline
+    global selanchorid selrangeupdate
     global varcid vrownum varcorder varcix varccommits
     global vupptr vdownptr vleftptr varctok
     global displayorder parentlist curview cached_commitrow
@@ -1486,6 +1487,10 @@ proc update_arcrows {v} {
     set vrowmod($v) $row
     if {[info exists currentid]} {
         set selectedline [rowofcommit $currentid]
+        if {[info exists selanchorid]} {
+            after cancel selrangeupdate
+            set selrangeupdate [after 100 refreshselectedrange]
+        }
     }
 }
 
@@ -2847,7 +2852,7 @@ proc makewindow {} {
     bind .pwbottom <Configure> {resizecdetpanes %W %w}
 
     pack .ctop -fill both -expand 1
-    bindall <1> {selcanvline %W %x %y}
+    bindall <1> {selcanvline %W %x %y [expr {(%s & 1) != 0}]}
 
     #Mouse / touchpad scrolling
     if {[tk windowingsystem] == "win32" || [package vcompare $::tcl_version 8.7] >= 0} {
@@ -3335,6 +3340,7 @@ proc keys {} {
 [mc "<End>		Move to last commit"]
 [mc "<Up>, p, k	Move up one commit"]
 [mc "<Down>, n, j	Move down one commit"]
+[mc "<Shift-click>	Select a contiguous commit range"]
 [mc "<Left>, z, h	Go back in history list"]
 [mc "<Right>, x, l	Go forward in history list"]
 [mc "<%s-n>	Go to n-th parent of current commit in history list" $M1T]
@@ -4878,12 +4884,8 @@ proc bolden {id font} {
     if {$need_redisplay} return
     lappend boldids $id
     $canv itemconf $linehtag($id) -font $font
-    if {[info exists currentid] && $id eq $currentid} {
-        $canv delete secsel
-        set t [eval $canv create rect [$canv bbox $linehtag($id)] \
-                   -outline {{}} -tags secsel \
-                   -fill [$canv cget -selectbackground]]
-        $canv lower $t
+    if {[rowselected [rowofcommit $id]]} {
+        make_secsel $id
     }
     if {[info exists markedid] && $id eq $markedid} {
         make_idmark $id
@@ -4896,12 +4898,8 @@ proc bolden_name {id font} {
     if {$need_redisplay} return
     lappend boldnameids $id
     $canv2 itemconf $linentag($id) -font $font
-    if {[info exists currentid] && $id eq $currentid} {
-        $canv2 delete secsel
-        set t [eval $canv2 create rect [$canv2 bbox $linentag($id)] \
-                   -outline {{}} -tags secsel \
-                   -fill [$canv2 cget -selectbackground]]
-        $canv2 lower $t
+    if {[rowselected [rowofcommit $id]]} {
+        make_secsel $id
     }
 }
 
@@ -6479,7 +6477,7 @@ proc drawcmittext {id row col} {
     }
     set circleitem($row) $t
     $canv raise $t
-    $canv bind $t <1> {selcanvline {} %x %y}
+    $canv bind $t <1> {selcanvline {} %x %y [expr {(%s & 1) != 0}]}
     set rmx [llength [lindex $rowidlist $row]]
     set olds [lindex $parentlist $row]
     if {$olds ne {}} {
@@ -6523,7 +6521,7 @@ proc drawcmittext {id row col} {
                            -text $name -font $nfont -tags text]
     set linedtag($id) [$canv3 create text 3 $y -anchor w -fill $fgcolor \
                            -text $date -font mainfont -tags text]
-    if {$selectedline == $row} {
+    if {[rowselected $row]} {
         make_secsel $id
     }
     if {[info exists markedid] && $markedid eq $id} {
@@ -7306,8 +7304,8 @@ proc unmarkmatches {} {
     stopfinding
 }
 
-proc selcanvline {w x y} {
-    global canv canvy0 ctext linespc
+proc selcanvline {w x y {extend 0}} {
+    global canv canvy0 ctext linespc selectedline
     global rowtextx
     set ymax [lindex [$canv cget -scrollregion] 3]
     if {$ymax == {}} return
@@ -7323,7 +7321,11 @@ proc selcanvline {w x y} {
         if {![info exists rowtextx($l)] || $xleft + $x < $rowtextx($l)} return
     }
     unmarkmatches
-    selectline $l 1
+    if {$extend && $selectedline ne {}} {
+        selectline $l 1 {} 1 1
+    } else {
+        selectline $l 1
+    }
 }
 
 proc commit_descriptor {p} {
@@ -7591,22 +7593,51 @@ proc dispnexttag {} {
     }
 }
 
+proc selectedrange {} {
+    global selectedline selanchorid curview
+
+    if {$selectedline eq {}} {return {}}
+    set first $selectedline
+    set last $selectedline
+    if {[info exists selanchorid] && [commitinview $selanchorid $curview]} {
+        set anchor [rowofcommit $selanchorid]
+        if {$anchor ne {}} {
+            if {$anchor < $first} {set first $anchor}
+            if {$anchor > $last} {set last $anchor}
+        }
+    }
+    return [list $first $last]
+}
+
+proc rowselected {row} {
+    set range [selectedrange]
+    if {$range eq {}} {return 0}
+    return [expr {$row >= [lindex $range 0] && $row <= [lindex $range 1]}]
+}
+
+# Tag each rectangle with its commit so redrawing one row doesn't disturb
+# the rest of a range selection.
 proc make_secsel {id} {
     global linehtag linentag linedtag canv canv2 canv3
 
     if {![info exists linehtag($id)]} return
-    $canv delete secsel
-    set t [eval $canv create rect [$canv bbox $linehtag($id)] -outline {{}} \
-               -tags secsel -fill [$canv cget -selectbackground]]
-    $canv lower $t
-    $canv2 delete secsel
-    set t [eval $canv2 create rect [$canv2 bbox $linentag($id)] -outline {{}} \
-               -tags secsel -fill [$canv2 cget -selectbackground]]
-    $canv2 lower $t
-    $canv3 delete secsel
-    set t [eval $canv3 create rect [$canv3 bbox $linedtag($id)] -outline {{}} \
-               -tags secsel -fill [$canv3 cget -selectbackground]]
-    $canv3 lower $t
+    foreach c [list $canv $canv2 $canv3] \
+        item [list $linehtag($id) $linentag($id) $linedtag($id)] {
+        $c delete secsel.$id
+        set t [$c create rect {*}[$c bbox $item] -outline {} \
+                   -tags [list secsel secsel.$id] \
+                   -fill [$c cget -selectbackground]]
+        $c lower $t
+    }
+}
+
+proc draw_secsel {} {
+    allcanvs delete secsel
+    set range [selectedrange]
+    if {$range eq {}} return
+    for {set row [lindex $range 0]} {$row <= [lindex $range 1]} {incr row} {
+        make_secsel [commitonrow $row]
+    }
 }
 
 proc make_idmark {id} {
@@ -7619,7 +7650,7 @@ proc make_idmark {id} {
     $canv raise $t
 }
 
-proc selectline {l isnew {desired_loc {}} {switch_to_patch 0}} {
+proc selectline {l isnew {desired_loc {}} {switch_to_patch 0} {extend 0}} {
     global canv ctext commitinfo selectedline
     global canvy0 linespc parents children curview origparents
     global currentid sha1entry
@@ -7628,7 +7659,7 @@ proc selectline {l isnew {desired_loc {}} {switch_to_patch 0}} {
     global cmitmode showneartags allcommits
     global targetrow targetid lastscrollrows
     global autocopy autoselect autosellen jump_to_here
-    global vinlinediff
+    global vinlinediff selanchorid
 
     unset -nocomplain pending_select
     $canv delete hover
@@ -7636,6 +7667,13 @@ proc selectline {l isnew {desired_loc {}} {switch_to_patch 0}} {
     unsel_reflist
     stopfinding
     if {$l < 0 || $l >= $numcommits} return
+    if {$extend} {
+        if {![info exists selanchorid] && $selectedline ne {}} {
+            set selanchorid [commitonrow $selectedline]
+        }
+    } else {
+        unset -nocomplain selanchorid
+    }
     set id [commitonrow $l]
     set targetid $id
     set targetrow $l
@@ -7685,10 +7723,14 @@ proc selectline {l isnew {desired_loc {}} {switch_to_patch 0}} {
         drawvisible
     }
 
-    make_secsel $id
+    draw_secsel
 
     if {$isnew} {
-        addtohistory [list selbyid $id 0] savecmitpos
+        if {[info exists selanchorid] && $selanchorid ne $id} {
+            addtohistory [list selrangebyids $selanchorid $id 0] savecmitpos
+        } else {
+            addtohistory [list selbyid $id 0] savecmitpos
+        }
     }
 
     $sha1entry delete 0 end
@@ -7784,7 +7826,10 @@ proc selectline {l isnew {desired_loc {}} {switch_to_patch 0}} {
 
     set jump_to_here $desired_loc
     init_flist [mc "Comments"]
-    if {$cmitmode eq "tree"} {
+    set range [selectedrange]
+    if {[lindex $range 0] != [lindex $range 1]} {
+        showselectedrange $range
+    } elseif {$cmitmode eq "tree"} {
         gettree $id
     } elseif {$vinlinediff($curview) == 1} {
         showinlinediff $id
@@ -7793,6 +7838,73 @@ proc selectline {l isnew {desired_loc {}} {switch_to_patch 0}} {
     } else {
         mergediff $id
     }
+}
+
+proc commitparents {id} {
+    global actualparents parents curview nullid nullid2
+
+    if {$id eq $nullid || $id eq $nullid2} {
+        return $parents($curview,$id)
+    }
+    if {![info exists actualparents($id)]} {
+        if {[catch {set line [safe_exec [list git rev-list --parents -n 1 $id]]}]} {
+            set actualparents($id) {}
+        } else {
+            set actualparents($id) [lrange $line 1 end]
+        }
+    }
+    return $actualparents($id)
+}
+
+proc showselectedrange {range} {
+    global ctext commitinfo diffids diffmergeid linknum
+
+    set first [lindex $range 0]
+    set last [lindex $range 1]
+    set newest [commitonrow $first]
+    set oldest [commitonrow $last]
+    set linear 1
+    for {set row $first} {$row < $last} {incr row} {
+        set id [commitonrow $row]
+        set next [commitonrow [expr {$row + 1}]]
+        if {[lsearch -exact [commitparents $id] $next] < 0} {
+            set linear 0
+            break
+        }
+    }
+
+    $ctext conf -state normal
+    $ctext insert end "\n[mc "%d selected commits:" [expr {$last - $first + 1}]]\n" filesep
+    for {set row $first} {$row <= $last} {incr row} {
+        set id [commitonrow $row]
+        if {![info exists commitinfo($id)]} {
+            getcommit $id
+        }
+        appendshortlink $id "    " "  [lindex $commitinfo($id) 0]\n"
+    }
+    if {!$linear} {
+        $ctext insert end "\n[mc "Selected commits do not form a contiguous history."]\n" filesep
+    }
+    $ctext conf -state disabled
+
+    if {!$linear} {
+        # Make readers for an earlier selection discard any pending output.
+        set diffids [list nonlinear-selection $newest $oldest]
+        set diffmergeid nonlinear-selection
+        settabs 1
+        return
+    }
+
+    set olds [commitparents $oldest]
+    if {[llength $olds]} {
+        set base [lindex $olds 0]
+    } elseif {[catch {
+        set base [string trim [safe_exec [list git hash-object -t tree /dev/null]]]
+    } err]} {
+        error_popup [mc "Error getting diffs: %s" $err]
+        return
+    }
+    startdiff [list $base $newest]
 }
 
 proc selfirstline {} {
@@ -7837,19 +7949,30 @@ proc selnextpage {dir} {
 }
 
 proc unselectline {} {
-    global selectedline currentid
+    global selectedline currentid selanchorid
 
     set selectedline {}
     unset -nocomplain currentid
+    unset -nocomplain selanchorid
     allcanvs delete secsel
     rhighlight_none
 }
 
 proc reselectline {} {
-    global selectedline
+    global selectedline selanchorid
 
     if {$selectedline ne {}} {
-        selectline $selectedline 0
+        selectline $selectedline 0 {} 0 [info exists selanchorid]
+    }
+}
+
+proc refreshselectedrange {} {
+    global selectedline selanchorid selrangeupdate curview
+
+    unset -nocomplain selrangeupdate
+    if {$selectedline ne {} && [info exists selanchorid]
+        && [commitinview $selanchorid $curview]} {
+        reselectline
     }
 }
 
@@ -8382,7 +8505,8 @@ proc getblobdiffs {ids} {
     # full diff between the merge and its first parent (the net change the
     # merged branch brought to the mainline).
     unset -nocomplain blobdiffnetpending($ids)
-    if {$mergetomain && [llength $parents($curview,$ids)] > 1} {
+    if {$mergetomain && [llength $ids] == 1
+        && [llength $parents($curview,$ids)] > 1} {
         set p0 [lindex $parents($curview,$ids) 0]
         set netcmd [diffcmd [list $p0 $ids] \
                         "-p --textconv --submodule -C --no-commit-id -U$diffcontext"]
@@ -9031,7 +9155,7 @@ proc redisplay {} {
     allcanvs yview moveto [lindex $span 0]
     drawvisible
     if {$selectedline ne {}} {
-        selectline $selectedline 0
+        reselectline
         allcanvs yview moveto [lindex $span 0]
     }
 }
@@ -9348,6 +9472,14 @@ proc selbyid {id {isnew 1}} {
     if {[commitinview $id $curview]} {
         selectline [rowofcommit $id] $isnew
     }
+}
+
+proc selrangebyids {anchor id {isnew 1}} {
+    global selanchorid curview
+
+    if {![commitinview $anchor $curview] || ![commitinview $id $curview]} return
+    set selanchorid $anchor
+    selectline [rowofcommit $id] $isnew {} 1 1
 }
 
 proc mstime {} {
@@ -9819,7 +9951,7 @@ proc redrawtags {id} {
         set canvxmax $xr
         setcanvscroll
     }
-    if {[info exists currentid] && $currentid == $id} {
+    if {[rowselected [rowofcommit $id]]} {
         make_secsel $id
     }
     if {[info exists markedid] && $markedid eq $id} {
